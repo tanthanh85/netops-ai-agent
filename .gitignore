@@ -1,0 +1,14 @@
+# Ignore Python virtual environment folders starting with router_ai_
+router_ai_*/
+
+# Ignore environment files
+.env
+
+# (Optional) Ignore common Python build files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
