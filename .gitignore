@@ -1,5 +1,6 @@
 # Ignore Python virtual environment folders starting with router_ai_
 router_ai_*/
+nexus_ai_*/
 
 # Ignore environment files
 .env
