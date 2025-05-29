@@ -13,15 +13,21 @@ import pickle
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 import os
-# import difflib
 
 
+import hashlib
 
-#normalize configuration
-def normalize_config(config,strip_line):
-    lines = config.strip().splitlines()
-    # Skip the first 4 lines
-    return "\n".join(lines[strip_line:]).strip()
+#==========generate unique event id================
+def generate_event_uid(event_data: dict, agent_id: str = None) -> str:
+    try:
+        if not agent_id:
+            agent_id = socket.gethostbyname(socket.gethostname())
+        timestamp = int(time.time() * 1000)
+        content_str = json.dumps(event_data, sort_keys=True)
+        content_hash = hashlib.sha256(content_str.encode()).hexdigest()[:8]
+        return f"{agent_id}-{timestamp}-{content_hash}"
+    except Exception as e:
+        return f"unknown-{int(time.time() * 1000)}"
 
 # ========== Post-Classification Fallback Rules ==========
 def apply_fallback_rules(message, predicted_severity):
@@ -56,16 +62,16 @@ def apply_fallback_rules(message, predicted_severity):
     return predicted_severity
 
 # ========== Splunk Config ==========
-SPLUNK_HEC_URL = os.getenv("splunk_url")
+SPLUNK_HEC_URL = "https://192.168.50.18:8088/services/collector/event"
 SPLUNK_HEC_TOKEN = os.getenv("splunk_token")
 
 # ========== Router Info ==========
 router = {
     'device_type': 'cisco_ios',
-    'host': os.getenv('router1'),
+    'host': '192.168.50.101',
     'username': os.getenv('username'),
     'password': os.getenv('password'),
-    'secret': os.getenv('password')
+    'secret': 'cisco123'
 }
 agent_id = f"router-{router['host'].replace('.', '-')}"
 model_dir = "./router_ai_model_bert"
@@ -106,67 +112,37 @@ def predict_show_debug_cmds(message):
 
 # ========== Router Collector ==========
 def collect_router_data(show_cmds, debug_cmds):
-    collected_debug_data = {}
-    collected_show_data = {}
-    try:
-        conn = ConnectHandler(**router)
-        conn.enable()
-        conn.send_command_timing("terminal length 0")
+    conn = ConnectHandler(**router)
+    conn.enable()
+    conn.send_command_timing("terminal length 0")
 
-        # Start debug commands
-        for dbg in debug_cmds.split(","):
-        #     conn.send_command_timing(dbg.strip())
-        # time.sleep(60)
-        # debug_output = conn.send_command("show logging last 100")
-        # conn.send_command_timing("undebug all")
-            dbg=dbg.strip()
-            conn.send_command_timing("clear logging\n")
-            conn.send_command_timing("\n")
-            time.sleep(2)
-            conn.send_command_timing(dbg)
-            time.sleep(20)
-            debug_log=conn.send_command("show logging")
-            conn.send_command_timing("undebug all")
-            collected_debug_data[dbg]=debug_log
+    # Start debug commands
+    for dbg in debug_cmds.split(","):
+        conn.send_command_timing(dbg.strip())
+    time.sleep(60)
+    debug_output = conn.send_command("show logging last 100")
+    conn.send_command_timing("undebug all")
 
-        # Show command outputs with clear separation
-        #show_outputs = {}
-        for cmd in show_cmds.split(","):
-            cmd = cmd.strip()
-            try:
+    # Show command outputs with clear separation
+    show_outputs = {}
+    for cmd in show_cmds.split(","):
+        cmd = cmd.strip()
+        try:
+            result = conn.send_command(cmd, use_textfsm=True)
+            if not result:
                 result = conn.send_command(cmd)
-                if not result:
-                    result = conn.send_command(cmd)
-            except Exception:
-                result = conn.send_command(cmd)
-            if cmd:
-                collected_show_data[cmd] = result
+        except Exception:
+            result = conn.send_command(cmd)
+        show_outputs[cmd] = result
 
+    # Compare with golden config
+    running_config = conn.send_command("show running-config")
+    golden_config = conn.send_command("more flash:golden_config")
+    config_changed = running_config.strip() != golden_config.strip()
+    config_diff = [line for line in running_config.splitlines() if line not in golden_config.splitlines()]
+    conn.disconnect()
 
-        # Compare with golden config
-        running_config = normalize_config(conn.send_command("show running-config"),5)
-        golden_config = normalize_config(conn.send_command("more flash:golden_config"),3)
-        # config_changed = running_config.strip() != golden_config.strip()
-        config_changed=False
-        # diff = list(difflib.unified_diff(running_config, golden_config,lineterm=''))
-        # print('\nBelow is diff')
-        # print(diff)
-        # if len(diff)>0:
-        #     config_changed=True
-        config_diff = [line for line in running_config.splitlines() if line not in golden_config.splitlines()]
-        if len(config_diff)>0:
-            config_changed=True
-        conn.disconnect()
-
-        return collected_show_data, collected_debug_data, config_changed, config_diff[:50]
-    
-    except Exception as e:
-        return f"Error: {str(e)}"
-
-    finally:
-        # Ensure the connection is closed
-        if 'conn' in locals() and conn:
-            conn.disconnect()
+    return show_outputs, debug_output, config_changed, config_diff[:50]
 
 # ========== Payload Builder ==========
 def build_otel_payload(message, severity, confidence, show_data, debug_output, show_cmds, debug_cmds, config_changed, config_diff):
@@ -183,30 +159,24 @@ def build_otel_payload(message, severity, confidence, show_data, debug_output, s
                 }
             },
             "scope": {
-                "name": "router_ai_agent",
+                "name": "router_agent_otel",
                 "version": "1.0.1"
             },
             "logs": [
                 {
                     "time_unix_nano": int(time.time() * 1e9),
-                    "severity": severity,
-                    "original syslog message": message,
+                    "severity_text": severity,
+                    "body": message,
                     "attributes": {
                         "router_id": agent_id,
                         "severity": severity,
                         "confidence": round(confidence, 2),
-                        # "message": message,
-                        # "show_cmds": show_cmds,
-                        # "debug_cmds": debug_cmds,
-                        "collected_show_data": {
-                            "show commands": show_cmds,
-                            "show_outputs": show_data
-                        },
-                        "collected_debug_data": {
-                            "debug commands": debug_cmds,
-                            "debug data": debug_output
-                        },
-                        "config_changed?": config_changed,
+                        "message": message,
+                        "show_cmds": show_cmds,
+                        "debug_cmds": debug_cmds,
+                        "collected_show_data": show_data,
+                        "debug_log_raw": debug_output[:200000],
+                        "config_changed": config_changed,
                         "config_diff": config_diff,
                         "timestamp": now
                     }
@@ -249,6 +219,7 @@ def process_syslog(message):
             show_cmds, debug_cmds = predict_show_debug_cmds(message)
             show_data, debug_output, config_changed, config_diff = collect_router_data(show_cmds, debug_cmds)
             payload = build_otel_payload(message, severity, confidence, show_data, debug_output, show_cmds, debug_cmds, config_changed, config_diff)
+            payload["event"]["event_uid"] = generate_event_uid(payload["event"])
             send_to_splunk(payload)
         else:
             print("[AI Agent] Message is non critical/info. Ignored.")
@@ -256,7 +227,7 @@ def process_syslog(message):
         print("[!] Error handling syslog:", e)
 
 # ========== Syslog Server ==========
-def syslog_server(host="0.0.0.0", port=1514):
+def syslog_server(host="0.0.0.0", port=514):
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         sock.bind((host, port))
@@ -265,7 +236,7 @@ def syslog_server(host="0.0.0.0", port=1514):
         print("[!] Permission denied. Use sudo or change port >1024.")
         return
 
-    executor = ThreadPoolExecutor(max_workers=10)
+    executor = ThreadPoolExecutor(max_workers=4)
     while True:
         data, addr = sock.recvfrom(4096)
         message = data.decode(errors='ignore').strip()
@@ -278,3 +249,6 @@ if __name__ == "__main__":
     while True:
         schedule.run_pending()
         time.sleep(1)
+
+
+
