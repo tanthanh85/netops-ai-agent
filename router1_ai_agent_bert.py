@@ -3,7 +3,7 @@ import socket
 import threading
 import schedule
 import requests
-from datetime import datetime
+from datetime import datetime,timezone
 from netmiko import ConnectHandler
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 import torch
@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 import os
 # import difflib
+from Gen_Unique_Event_Id import *
 
 
 
@@ -67,7 +68,7 @@ router = {
     'password': os.getenv('password'),
     'secret': os.getenv('password')
 }
-agent_id = f"router-{router['host'].replace('.', '-')}"
+agent_id = "R1"
 model_dir = "./router_ai_model_bert"
 recent_events = {}
 
@@ -170,9 +171,12 @@ def collect_router_data(show_cmds, debug_cmds):
 
 # ========== Payload Builder ==========
 def build_otel_payload(message, severity, confidence, show_data, debug_output, show_cmds, debug_cmds, config_changed, config_diff):
-    now = datetime.utcnow().isoformat() + "Z"
+    now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    event_id=generate_event_id(agent_id,now,message)
+
     return {
         "host": agent_id,
+       "event_id": event_id,
         "sourcetype": "otel:router:agent",
         "time": time.time(),
         "event": {
@@ -195,9 +199,6 @@ def build_otel_payload(message, severity, confidence, show_data, debug_output, s
                         "router_id": agent_id,
                         "severity": severity,
                         "confidence": round(confidence, 2),
-                        # "message": message,
-                        # "show_cmds": show_cmds,
-                        # "debug_cmds": debug_cmds,
                         "collected_show_data": {
                             "show commands": show_cmds,
                             "show_outputs": show_data
