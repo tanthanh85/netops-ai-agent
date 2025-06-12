@@ -2,19 +2,17 @@ import time
 import socket
 import threading
 import schedule
-import requests
-from datetime import datetime,timezone
 from netmiko import ConnectHandler
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 import torch
 import torch.nn.functional as F
-import json
 import pickle
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 import os
-# import difflib
 from Gen_Unique_Event_Id import *
+from Build_Otel_Payload import build_otel_payload
+from Send_To_Splunk import send_to_splunk
 
 
 
@@ -56,9 +54,7 @@ def apply_fallback_rules(message, predicted_severity):
 
     return predicted_severity
 
-# ========== Splunk Config ==========
-SPLUNK_HEC_URL = os.getenv("splunk_url")
-SPLUNK_HEC_TOKEN = os.getenv("splunk_token")
+
 
 # ========== Router Info ==========
 router = {
@@ -169,64 +165,6 @@ def collect_router_data(show_cmds, debug_cmds):
         if 'conn' in locals() and conn:
             conn.disconnect()
 
-# ========== Payload Builder ==========
-def build_otel_payload(message, severity, confidence, show_data, debug_output, show_cmds, debug_cmds, config_changed, config_diff):
-    now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-    event_id=generate_event_id(agent_id,now,message)
-
-    return {
-        "host": agent_id,
-       "event_id": event_id,
-        "sourcetype": "otel:router:agent",
-        "time": time.time(),
-        "event": {
-            "resource": {
-                "attributes": {
-                    "host.name": agent_id,
-                    "service.name": "router-ai-agent"
-                }
-            },
-            "scope": {
-                "name": "router_ai_agent",
-                "version": "1.0.1"
-            },
-            "logs": [
-                {
-                    "time_unix_nano": int(time.time() * 1e9),
-                    "severity": severity,
-                    "original syslog message": message,
-                    "attributes": {
-                        "router_id": agent_id,
-                        "severity": severity,
-                        "confidence": round(confidence, 2),
-                        "collected_show_data": {
-                            "show commands": show_cmds,
-                            "show_outputs": show_data
-                        },
-                        "collected_debug_data": {
-                            "debug commands": debug_cmds,
-                            "debug data": debug_output
-                        },
-                        "config_changed?": config_changed,
-                        "config_diff": config_diff,
-                        "timestamp": now
-                    }
-                }
-            ]
-        }
-    }
-
-# ========== Send event to Splunk ==========
-def send_to_splunk(payload):
-    headers = {
-        "Authorization": f"Splunk {SPLUNK_HEC_TOKEN}",
-        "Content-Type": "application/json"
-    }
-    try:
-        response = requests.post(SPLUNK_HEC_URL, headers=headers, data=json.dumps(payload), verify=False)
-        print("[+] Sent to Splunk. Status:", response.status_code)
-    except Exception as e:
-        print("[!] Failed to send to Splunk:", e)
 
 # ========== Main Event Handler ==========
 def process_syslog(message):
@@ -249,7 +187,7 @@ def process_syslog(message):
         if severity == "Critical":
             show_cmds, debug_cmds = predict_show_debug_cmds(message)
             show_data, debug_output, config_changed, config_diff = collect_router_data(show_cmds, debug_cmds)
-            payload = build_otel_payload(message, severity, confidence, show_data, debug_output, show_cmds, debug_cmds, config_changed, config_diff)
+            payload = build_otel_payload(message, severity, confidence, show_data, debug_output, show_cmds, debug_cmds, config_changed, config_diff,agent_id)
             send_to_splunk(payload)
         else:
             print("[AI Agent] Message is non critical/info. Ignored.")
